@@ -1,0 +1,152 @@
+% specparam() - Fit the specparam model on a neural power spectrum.
+%
+% Usage:
+%   >> specparam_results = specparam(freqs, power_spectrum, f_range, settings, return_model);
+%
+% Inputs:
+%   freqs           = row vector of frequency values
+%   power_spectrum  = row vector of power values
+%   f_range         = fitting range (Hz)
+%   settings        = specparam model settings, in a struct, including:
+%       settings.peak_width_limts   default: [0.5, 12]
+%       settings.max_n_peaks        default: infinite
+%       settings.min_peak_height    default: 2.0
+%       settings.peak_threshold     default: 0
+%       settings.aperiodic_mode     default: default
+%       settings.verbose
+%   return_model    = boolean of whether to return the specparam model fit, optional
+%
+% Outputs:
+%   specparam_results   = specparam model ouputs, in a struct, including:
+%       specparam_results.aperiodic_params
+%       specparam_results.peak_params
+%       specparam_results.gaussian_params
+%       specparam_results.error
+%       specparam_results.r_squared
+%       specparam_results.fit_ok      = true/false, whether the Python fit succeeded
+%       if return_model is true and the fit succeeded, it also includes:
+%            specparam_results.freqs
+%            specparam_results.power_spectrum
+%            specparam_results.specparamed_spectrum
+%            specparam_results.ap_fit
+%
+% Notes
+%   Not all settings need to be defined by the user.
+%     Any settings that are not provided are set to default values.
+%     To run with all defaults, input settings as an empty struct.
+%
+%   If the underlying Python fit fails (e.g. degenerate/invalid spectrum),
+%     this function does NOT throw. Note that specparam's Python fit()
+%     call can fail "silently" from MATLAB's perspective: it prints
+%     "Model fitting was unsuccessful" internally and returns normally
+%     WITHOUT raising a Python exception, leaving fm.results as None.
+%     So the try/catch below must wrap both the fit call AND the result
+%     extraction - a failure only becomes visible to MATLAB when the
+%     None result is accessed. On any failure, this function warns with
+%     the trial's failure message and returns a results struct with
+%     NaN-filled parameters (correctly sized for the chosen aperiodic_mode)
+%     and specparam_results.fit_ok = false. This lets specparam_group()
+%     keep iterating over the rest of a batch instead of the whole run
+%     crashing on a single bad trial.
+function specparam_results = specparam(freqs, power_spectrum, f_range, settings, return_model, trial_idx)
+   % Check settings - get defaults for those not provided
+    settings = specparam_check_settings(settings);
+    % Keep original MATLAB vectors for use in the failure-path placeholder
+    % fields below, since freqs/power_spectrum get overwritten with Python
+    % objects on the next lines
+    freqs_orig = freqs;
+    power_spectrum_orig = power_spectrum;
+    % Convert inputs
+    freqs = py.numpy.array(freqs);
+    power_spectrum = py.numpy.array(power_spectrum);
+    f_range = py.list(f_range);
+    % Initialize SpectralModel object (specparam)
+    fm = py.specparam.SpectralModel(pyargs(...
+        'peak_width_limits', settings.peak_width_limits, ...
+        'max_n_peaks', settings.max_n_peaks, ...
+        'min_peak_height', settings.min_peak_height, ...
+        'peak_threshold', settings.peak_threshold, ...
+        'aperiodic_mode', settings.aperiodic_mode, ...
+        'verbose', settings.verbose));
+
+    specparam_results = struct();
+
+    % Run fit AND extract outputs in the same try block. This is necessary
+    % because a failed fit does not always raise a Python exception at
+    % fm.fit() itself - it can fail internally and leave fm.results as
+    % None, which only errors out once we try to read from it below.
+    try
+        fm.fit(freqs, power_spectrum, f_range)
+
+        % Extract outputs directly from new specparam structure
+        % Aperiodic params (offset, [knee], exponent)
+        specparam_results.aperiodic_params = double(py.array.array('d', fm.results.params.aperiodic.params));
+
+        % Peak/gaussian params (CF, PW, BW) - one row per peak
+        temp = double(py.array.array('d', fm.results.params.periodic.params.ravel()));
+        if isempty(temp)
+            specparam_results.peak_params = [];
+            specparam_results.gaussian_params = [];
+        else
+            specparam_results.peak_params = transpose(reshape(temp, 3, length(temp) / 3));
+            specparam_results.gaussian_params = specparam_results.peak_params;
+        end
+
+        % Error and r_squared from metrics results dict
+        metrics_results = fm.results.metrics.results;
+        specparam_results.error = double(metrics_results{'error_mae'});
+        specparam_results.r_squared = double(metrics_results{'gof_rsquared'});
+
+        % Also return the actual model fit, if requested
+        if exist('return_model', 'var') && return_model
+            % Get the model, and add outputs to specparam_results
+            model_out = specparam_get_model(fm);
+            for field = fieldnames(model_out)'
+                specparam_results.(field{1}) = model_out.(field{1});
+            end
+        end
+
+        specparam_results.fit_ok = true;
+
+    catch ME
+        if exist('trial_idx','var')
+            warning('specparam fit failed for valid-trial index %d: %s', trial_idx, ME.message);
+        else
+            warning('specparam fit failed for this trial: %s', ME.message);
+        end
+        % Fit failed - fill with NaN placeholders, sized to match the
+        % number of aperiodic parameters expected for this mode, so
+        % downstream code indexing aperiodic_params(1)/(2)/(3) etc.
+        % doesn't error out on a missing/short array
+        switch lower(settings.aperiodic_mode)
+            case 'doublexp'
+                specparam_results.aperiodic_params = NaN(1,4);  % offset, exponent_1, knee, exponent_2
+            case 'knee'
+                specparam_results.aperiodic_params = NaN(1,3);  % offset, knee, exponent
+            otherwise
+                specparam_results.aperiodic_params = NaN(1,2);  % offset, exponent
+        end
+
+        specparam_results.peak_params = [];
+        specparam_results.gaussian_params = [];
+        specparam_results.error = NaN;
+        specparam_results.r_squared = NaN;
+        specparam_results.fit_ok = false;
+
+        % If return_model was requested, the success branch adds
+        % freqs/power_spectrum/specparamed_spectrum/ap_fit fields via
+        % specparam_get_model(fm). specparam_group() concatenates every
+        % trial's result into one struct array, which requires every
+        % element to have the SAME set of fields - so on failure we must
+        % still add these fields (as placeholders) whenever return_model
+        % is true, or concatenation will throw a field-mismatch error.
+        if exist('return_model', 'var') && return_model
+            specparam_results.freqs = freqs_orig;
+            specparam_results.power_spectrum = power_spectrum_orig;
+            specparam_results.specparamed_spectrum = NaN(size(power_spectrum_orig));
+            specparam_results.ap_fit = NaN(size(power_spectrum_orig));
+        end
+    end
+
+    specparam_results.settings = settings;
+end

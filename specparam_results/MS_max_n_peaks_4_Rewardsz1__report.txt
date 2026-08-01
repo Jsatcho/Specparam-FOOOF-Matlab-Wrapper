@@ -1,0 +1,30 @@
+
+==============================================================================
+                            SPECTRUM MODEL RESULTS
+
+             The model was fit with the 'spectral_fit' algorithm
+Model was fit to the 1.2207-99.8535 Hz frequency range with 0.24 Hz resolution
+
+                    Aperiodic Parameters ('doublexp' mode)
+                    (offset, exponent_1, knee, exponent_2)
+                    3.1356, 1.49001, 2.97456e+06, 3.20086
+
+               Peak Parameters ('gaussian' mode) 2 peaks found
+                       CF: 22.82, PW:  0.50, BW:  9.77
+                       CF: 96.11, PW:  0.09, BW: 12.00
+
+                                Model metrics:
+                            error (mae) is 0.0354
+                           gof (rsquared) is 0.9907
+==============================================================================
+
+==============================================================================
+                               FOOOF - SETTINGS
+
+                         Peak Width Limits : [3, 12]
+                           Max Number of Peaks : 4
+                           Minimum Peak Height : 0
+                              Peak Threshold : 2
+                          Aperiodic Mode : doublexp
+==============================================================================
+
